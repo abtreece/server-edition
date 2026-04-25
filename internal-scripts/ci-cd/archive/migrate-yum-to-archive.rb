@@ -1,8 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# One-time (reusable) migration script to move EOL distribution packages
+# Incremental migration script to move EOL distribution packages
 # from the main YUM repository to the archive YUM repository.
+# Safe to run repeatedly — merges new EOL distros into the existing archive.
 #
 # Usage:
 #   PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-yum-repo \

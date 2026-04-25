@@ -175,7 +175,15 @@ gsutil cat gs://fsruby-server-edition-apt-repo/versions/latest_version.txt
 echo -n "OLD_VERSION" | gsutil -h Content-Type:text/plain -h Cache-Control:no-store cp - gs://fsruby-server-edition-apt-repo/versions/latest_version.txt
 ~~~
 
-**Delete archive contents** (if archive was just created and no users depend on it yet):
+**Revert the archive to a previous version:**
+
+~~~bash
+gsutil cat gs://fsruby-server-edition-apt-repo-archive/versions/latest_version.txt
+
+echo -n "OLD_VERSION" | gsutil -h Content-Type:text/plain -h Cache-Control:no-store cp - gs://fsruby-server-edition-apt-repo-archive/versions/latest_version.txt
+~~~
+
+**Delete all archive contents** (if no users depend on it yet):
 
 ~~~bash
 gsutil -m rm -r gs://fsruby-server-edition-apt-repo-archive/versions/

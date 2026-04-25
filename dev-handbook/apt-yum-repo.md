@@ -56,7 +56,7 @@ There are five buckets:
  - `fullstaq-ruby-server-edition-yum-repo-archive` stores packages for EOL distributions (YUM).
  - `fullstaq-ruby-server-edition-ci-artifacts` stores the temporary repositories created during CI runs.
 
-The archive buckets are frozen — they are written to once during [EOL migration](archiving-eol-packages.md) and never modified by CI. They are served at `apt-archive.fullstaqruby.org` and `yum-archive.fullstaqruby.org`.
+The archive buckets are only updated during [EOL migration](archiving-eol-packages.md) — CI never writes to them. Each migration creates a new version that merges newly-archived distros with the existing archive contents. They are served at `apt-archive.fullstaqruby.org` and `yum-archive.fullstaqruby.org`.
 
 We don't let users use the production bucket URLs directly. Instead, we let users use `https://apt.fullstaqruby.org` and `https://yum.fullstaqruby.org`. These domains redirect to the appropriate bucket URLs. We do this so that we avoid strongly coupling users with Google Cloud Storage. If in the future we want to move off Google Cloud, we can do so without breaking users' URLs.
 
