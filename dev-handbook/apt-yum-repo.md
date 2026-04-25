@@ -48,11 +48,15 @@ Our design was made with the following requirements in mind, and addresses the f
 
 We self-host our repositories: we store them in Google Cloud Storage buckets. [Google Cloud Storage is strongly consistent.](https://cloud.google.com/storage/docs/consistency)
 
-There are three buckets:
+There are five buckets:
 
  - `fullstaq-ruby-server-edition-apt-repo` stores the production APT repository.
  - `fullstaq-ruby-server-edition-yum-repo` stores the production YUM repository.
+ - `fullstaq-ruby-server-edition-apt-repo-archive` stores packages for EOL distributions (APT).
+ - `fullstaq-ruby-server-edition-yum-repo-archive` stores packages for EOL distributions (YUM).
  - `fullstaq-ruby-server-edition-ci-artifacts` stores the temporary repositories created during CI runs.
+
+The archive buckets are frozen — they are written to once during [EOL migration](archiving-eol-packages.md) and never modified by CI. They are served at `apt-archive.fullstaqruby.org` and `yum-archive.fullstaqruby.org`.
 
 We don't let users use the production bucket URLs directly. Instead, we let users use `https://apt.fullstaqruby.org` and `https://yum.fullstaqruby.org`. These domains redirect to the appropriate bucket URLs. We do this so that we avoid strongly coupling users with Google Cloud Storage. If in the future we want to move off Google Cloud, we can do so without breaking users' URLs.
 
