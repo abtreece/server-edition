@@ -59,6 +59,15 @@ class MigrateAptToArchive
     end
     log_notice "EOL distributions to archive: #{eol_distros.join(', ')}"
 
+    print_header 'Fetching existing archive state (if any)'
+    @archive_version = get_latest_archive_version
+    if @archive_version > 0
+      log_notice "Existing archive at version #{@archive_version}, will merge"
+      fetch_archive_state(@archive_version)
+    else
+      log_notice 'No existing archive — creating fresh'
+    end
+
     print_header 'Creating archive repository'
     create_archive_state(eol_distros)
 
@@ -195,6 +204,41 @@ private
     "gs://#{ENV['PRODUCTION_REPO_BUCKET_NAME']}/versions/latest_version.txt"
   end
 
+  def get_latest_archive_version
+    url = "gs://#{ENV['ARCHIVE_REPO_BUCKET_NAME']}/versions/latest_version.txt"
+    stdout_output, stderr_output, status = run_command_capture_output(
+      'gsutil', 'cp', url, '-',
+      log_invocation: false,
+      check_error: false
+    )
+    if status.success?
+      v = stdout_output.strip
+      if v =~ /\A[0-9]+\Z/
+        v.to_i
+      else
+        abort("ERROR: invalid version number stored in #{url}")
+      end
+    elsif stderr_output =~ /No URLs matched/
+      0
+    else
+      abort("ERROR: error fetching #{url}: #{stderr_output.chomp}")
+    end
+  end
+
+  def fetch_archive_state(version)
+    log_notice "Fetching archive state version #{version}"
+    url = "gs://#{ENV['ARCHIVE_REPO_BUCKET_NAME']}/versions/#{version}/state.tar.zst"
+    run_bash(
+      sprintf('gsutil -m cp %s - | zstd -dc | tar -xC %s',
+        Shellwords.escape(url),
+        Shellwords.escape(@archive_state_path)),
+      pipefail: true,
+      log_invocation: true,
+      check_error: true,
+      passthru_output: true
+    )
+  end
+
   def identify_eol_distros
     if @explicit_distros
       log_notice "Using explicitly specified distros: #{@explicit_distros.join(', ')}"
@@ -238,13 +282,30 @@ private
   end
 
   def create_archive_state(eol_distros)
-    initialize_aptly(@archive_aptly_config_path, @archive_state_path, @archive_state_repo_path)
+    if @archive_version == 0
+      initialize_aptly(@archive_aptly_config_path, @archive_state_path, @archive_state_repo_path)
+    else
+      # Existing archive was fetched — just initialize the Aptly config pointing at it
+      initialize_aptly(@archive_aptly_config_path, @archive_state_path, @archive_state_repo_path)
+      existing = list_aptly_repos(@archive_aptly_config_path)
+      log_notice "Existing archive contains distros: #{existing.join(', ')}"
+    end
 
-    # Copy the package pool from main state so archive can reference the same files
+    # Copy EOL packages from main pool into archive pool
     main_pool = "#{@main_state_path}/pool"
     archive_pool = "#{@archive_state_path}/pool"
-    if File.exist?(main_pool) && !File.exist?(archive_pool)
-      FileUtils.cp_r(main_pool, @archive_state_path)
+    if File.exist?(main_pool)
+      if File.exist?(archive_pool)
+        # Merge: copy new pool files that don't already exist
+        run_bash(
+          sprintf('cp -rn %s/* %s/ 2>/dev/null || true',
+            Shellwords.escape(main_pool),
+            Shellwords.escape(archive_pool)),
+          log_invocation: false, check_error: false, pipefail: false
+        )
+      else
+        FileUtils.cp_r(main_pool, @archive_state_path)
+      end
     end
 
     eol_distros.each do |distro|
@@ -262,14 +323,14 @@ private
 
       # Import packages by copying the Aptly database directory for this repo
       main_repo_db = "#{@main_state_db_path}/repo/#{distro}"
-      archive_repo_db = "#{@archive_state_db_path}/repo/#{distro}"
       if File.exist?(main_repo_db)
         FileUtils.cp_r(main_repo_db, "#{@archive_state_db_path}/repo/")
       end
     end
 
-    # Publish each EOL distro in the archive
-    eol_distros.each do |distro|
+    # Publish all distros in the archive (existing + newly added)
+    all_archive_distros = list_aptly_repos(@archive_aptly_config_path)
+    all_archive_distros.each do |distro|
       log_notice "[#{distro}] Publishing in archive"
       publish_aptly_repo(@archive_aptly_config_path, distro)
     end
@@ -376,15 +437,16 @@ private
 
   def upload_archive
     archive_bucket = ENV['ARCHIVE_REPO_BUCKET_NAME']
+    new_archive_version = @archive_version + 1
 
     # Upload state
-    log_notice 'Uploading archive state'
+    log_notice "Uploading archive state as version #{new_archive_version}"
     run_command(
       'gsutil',
       '-h', 'Cache-Control:public',
       'cp',
       @archive_state_archive_path,
-      "gs://#{archive_bucket}/versions/1/state.tar.zst",
+      "gs://#{archive_bucket}/versions/#{new_archive_version}/state.tar.zst",
       log_invocation: true,
       check_error: true,
       passthru_output: true
@@ -397,7 +459,7 @@ private
       '-h', 'Cache-Control:public',
       'rsync', '-r', '-d',
       @archive_state_repo_path,
-      "gs://#{archive_bucket}/versions/1/public",
+      "gs://#{archive_bucket}/versions/#{new_archive_version}/public",
       log_invocation: true,
       check_error: true,
       passthru_output: true
@@ -406,8 +468,9 @@ private
     # Create version note
     run_bash(
       sprintf(
-        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<1',
-        Shellwords.escape("gs://#{archive_bucket}/versions/1/version.txt")
+        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<%s',
+        Shellwords.escape("gs://#{archive_bucket}/versions/#{new_archive_version}/version.txt"),
+        Shellwords.escape(new_archive_version.to_s)
       ),
       log_invocation: true,
       check_error: true,
@@ -417,8 +480,9 @@ private
     # Declare latest version
     run_bash(
       sprintf(
-        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<1',
-        Shellwords.escape("gs://#{archive_bucket}/versions/latest_version.txt")
+        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<%s',
+        Shellwords.escape("gs://#{archive_bucket}/versions/latest_version.txt"),
+        Shellwords.escape(new_archive_version.to_s)
       ),
       log_invocation: true,
       check_error: true,
@@ -495,14 +559,15 @@ private
   end
 
   def print_summary(eol_distros, old_version)
+    new_archive_version = @archive_version + 1
+    archive_bucket = ENV['ARCHIVE_REPO_BUCKET_NAME']
     log_notice 'Migration summary'
     log_info "Archived distributions: #{eol_distros.join(', ')}"
     log_info "Main repo: version #{old_version} -> #{old_version + 1}"
-    log_info "Archive repo: version 1"
+    log_info "Archive repo: version #{@archive_version} -> #{new_archive_version}"
     log_info ''
     log_info 'Archive APT repo URL:'
-    archive_bucket = ENV['ARCHIVE_REPO_BUCKET_NAME']
-    log_info "  https://storage.googleapis.com/#{archive_bucket}/versions/1/public"
+    log_info "  https://storage.googleapis.com/#{archive_bucket}/versions/#{new_archive_version}/public"
     log_info ''
     log_info 'Next steps:'
     log_info '  1. Restart the web server to pick up new archive version'

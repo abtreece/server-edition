@@ -50,6 +50,17 @@ class MigrateYumToArchive
     end
     log_notice "EOL distributions to archive: #{eol_distros.join(', ')}"
 
+    print_header 'Fetching existing archive (if any)'
+    @archive_version = get_latest_archive_version
+    if @archive_version > 0
+      log_notice "Existing archive at version #{@archive_version}, will merge"
+      fetch_archive_repo(@archive_version)
+    else
+      log_notice 'No existing archive — creating fresh'
+      @archive_repo_path = "#{@temp_dir}/archive-repo"
+      Dir.mkdir(@archive_repo_path)
+    end
+
     if @dry_run
       log_notice 'DRY RUN — not uploading changes'
       print_summary(eol_distros, version)
@@ -103,6 +114,41 @@ private
     "gs://#{ENV['PRODUCTION_REPO_BUCKET_NAME']}/versions/latest_version.txt"
   end
 
+  def get_latest_archive_version
+    url = "gs://#{ENV['ARCHIVE_REPO_BUCKET_NAME']}/versions/latest_version.txt"
+    stdout_output, stderr_output, status = run_command_capture_output(
+      'gsutil', 'cp', url, '-',
+      log_invocation: false,
+      check_error: false
+    )
+    if status.success?
+      v = stdout_output.strip
+      if v =~ /\A[0-9]+\Z/
+        v.to_i
+      else
+        abort("ERROR: invalid version number stored in #{url}")
+      end
+    elsif stderr_output =~ /No URLs matched/
+      0
+    else
+      abort("ERROR: error fetching #{url}: #{stderr_output.chomp}")
+    end
+  end
+
+  def fetch_archive_repo(version)
+    @archive_repo_path = "#{@temp_dir}/archive-repo"
+    Dir.mkdir(@archive_repo_path)
+    log_notice "Fetching archive repo version #{version}"
+    run_command(
+      'gsutil', '-m', 'rsync', '-r',
+      "gs://#{ENV['ARCHIVE_REPO_BUCKET_NAME']}/versions/#{version}/public",
+      @archive_repo_path,
+      log_invocation: true,
+      check_error: true,
+      passthru_output: true
+    )
+  end
+
   def fetch_main_repo(version)
     log_notice "Fetching main repo version #{version}"
     run_command(
@@ -139,26 +185,35 @@ private
 
   def upload_archive(eol_distros)
     archive_bucket = ENV['ARCHIVE_REPO_BUCKET_NAME']
+    new_archive_version = @archive_version + 1
 
+    # Copy EOL distro directories into the local archive repo
     eol_distros.each do |distro|
-      log_notice "[#{distro}] Uploading to archive"
-      run_command(
-        'gsutil', '-m',
-        '-h', 'Cache-Control:public',
-        'rsync', '-r',
-        "#{@local_repo_path}/#{distro}",
-        "gs://#{archive_bucket}/versions/1/public/#{distro}",
-        log_invocation: true,
-        check_error: true,
-        passthru_output: true
-      )
+      src = "#{@local_repo_path}/#{distro}"
+      dst = "#{@archive_repo_path}/#{distro}"
+      log_notice "[#{distro}] Copying to archive staging area"
+      FileUtils.cp_r(src, dst)
     end
+
+    # Upload merged archive repo
+    log_notice "Uploading archive repo as version #{new_archive_version}"
+    run_command(
+      'gsutil', '-m',
+      '-h', 'Cache-Control:public',
+      'rsync', '-r', '-d',
+      @archive_repo_path,
+      "gs://#{archive_bucket}/versions/#{new_archive_version}/public",
+      log_invocation: true,
+      check_error: true,
+      passthru_output: true
+    )
 
     # Create version note
     run_bash(
       sprintf(
-        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<1',
-        Shellwords.escape("gs://#{archive_bucket}/versions/1/version.txt")
+        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<%s',
+        Shellwords.escape("gs://#{archive_bucket}/versions/#{new_archive_version}/version.txt"),
+        Shellwords.escape(new_archive_version.to_s)
       ),
       log_invocation: true,
       check_error: true,
@@ -168,8 +223,9 @@ private
     # Declare latest version
     run_bash(
       sprintf(
-        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<1',
-        Shellwords.escape("gs://#{archive_bucket}/versions/latest_version.txt")
+        'gsutil -q -h Content-Type:text/plain -h Cache-Control:no-store cp - %s <<<%s',
+        Shellwords.escape("gs://#{archive_bucket}/versions/latest_version.txt"),
+        Shellwords.escape(new_archive_version.to_s)
       ),
       log_invocation: true,
       check_error: true,
@@ -242,14 +298,15 @@ private
   end
 
   def print_summary(eol_distros, old_version)
+    new_archive_version = @archive_version + 1
     archive_bucket = ENV['ARCHIVE_REPO_BUCKET_NAME']
     log_notice 'Migration summary'
     log_info "Archived distributions: #{eol_distros.join(', ')}"
     log_info "Main repo: version #{old_version} -> #{old_version + 1}"
-    log_info "Archive repo: version 1"
+    log_info "Archive repo: version #{@archive_version} -> #{new_archive_version}"
     log_info ''
     log_info 'Archive YUM repo URL:'
-    log_info "  https://storage.googleapis.com/#{archive_bucket}/versions/1/public"
+    log_info "  https://storage.googleapis.com/#{archive_bucket}/versions/#{new_archive_version}/public"
     log_info ''
     log_info 'Next steps:'
     log_info '  1. Restart the web server to pick up new archive version'

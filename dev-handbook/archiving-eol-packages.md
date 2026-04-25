@@ -15,7 +15,7 @@ To address this, we maintain **archive repositories** alongside the main reposit
 | YUM (main) | `fsruby-server-edition-yum-repo` | `yum.fullstaqruby.org` | Current, supported packages |
 | YUM (archive) | `fsruby-server-edition-yum-repo-archive` | `yum-archive.fullstaqruby.org` | Frozen packages for EOL distributions |
 
-Archive repositories are static — CI never writes to them. They use the same versioned bucket structure as the main repos but their version never changes after migration.
+Archive repositories are static — CI never writes to them. They use the same versioned bucket structure as the main repos. Each migration creates a new version that merges newly-archived distros with the existing archive contents, so the archive grows incrementally over time.
 
 This pattern follows the precedent set by [PostgreSQL](https://apt-archive.postgresql.org/) (`apt-archive.postgresql.org`) and [HashiCorp](https://www.hashicorp.com/en/blog/announcing-the-linux-package-archive-site) (`archive.releases.hashicorp.com`).
 
@@ -187,20 +187,24 @@ gsutil -m rm -r gs://fsruby-server-edition-apt-repo-archive/versions/
 
  1. Downloads the current Aptly state archive from the main bucket.
  2. Identifies EOL distros (published in Aptly but not in `config.yml`).
- 3. Creates a new Aptly instance for the archive and copies EOL distro data into it.
- 4. Publishes the archive Aptly state to the archive bucket.
- 5. Drops the EOL distro repos from the main Aptly database.
- 6. Runs `aptly db cleanup` to compact the database and reclaim pool space.
- 7. Re-publishes remaining distros in the main repo.
- 8. Uploads the trimmed state as a new version of the main repo.
+ 3. Fetches the existing archive state (if any) so new distros are merged into it.
+ 4. Creates or extends the archive Aptly instance with EOL distro data and package pool.
+ 5. Publishes all archive distros (existing + newly archived).
+ 6. Drops the EOL distro repos from the main Aptly database.
+ 7. Runs `aptly db cleanup` to compact the database and reclaim pool space.
+ 8. Re-publishes remaining distros in the main repo.
+ 9. Uploads the merged archive as a new archive version (N+1).
+ 10. Uploads the trimmed state as a new version of the main repo.
 
 ### YUM migration (`migrate-yum-to-archive.rb`)
 
  1. Downloads the current YUM repo from the main bucket via `gsutil rsync`.
  2. Identifies EOL distro directories.
- 3. Copies EOL distro directories to the archive bucket.
- 4. Removes EOL distro directories from the local copy.
- 5. Uploads the trimmed repo as a new version of the main bucket.
+ 3. Fetches the existing archive repo (if any) so new distros are merged into it.
+ 4. Copies EOL distro directories into the local archive copy.
+ 5. Uploads the merged archive as a new archive version (N+1).
+ 6. Removes EOL distro directories from the main local copy.
+ 7. Uploads the trimmed repo as a new version of the main bucket.
 
 ### APT pruning (`prune-apt-packages.rb`)
 
