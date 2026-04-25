@@ -50,11 +50,11 @@ We self-host our repositories: we store them in Google Cloud Storage buckets. [G
 
 There are five buckets:
 
- - `fullstaq-ruby-server-edition-apt-repo` stores the production APT repository.
- - `fullstaq-ruby-server-edition-yum-repo` stores the production YUM repository.
- - `fullstaq-ruby-server-edition-apt-repo-archive` stores packages for EOL distributions (APT).
- - `fullstaq-ruby-server-edition-yum-repo-archive` stores packages for EOL distributions (YUM).
- - `fullstaq-ruby-server-edition-ci-artifacts` stores the temporary repositories created during CI runs.
+ - `fsruby-server-edition-apt-repo` stores the production APT repository.
+ - `fsruby-server-edition-yum-repo` stores the production YUM repository.
+ - `fsruby-server-edition-apt-repo-archive` stores packages for EOL distributions (APT).
+ - `fsruby-server-edition-yum-repo-archive` stores packages for EOL distributions (YUM).
+ - `fsruby-server-edition-ci-artifacts` stores the temporary repositories created during CI runs.
 
 The archive buckets are only updated during [EOL migration](archiving-eol-packages.md) — CI never writes to them. Each migration creates a new version that merges newly-archived distros with the existing archive contents. They are served at `apt-archive.fullstaqruby.org` and `yum-archive.fullstaqruby.org`.
 
@@ -148,7 +148,7 @@ A downside of this versioning approach is that each version consumes a lot of sp
 
 ### CI bucket
 
-During CI runs, we create temporary repositories in `gs://fullstaq-ruby-server-edition-ci-artifacts/$CI_RUN_NUMBER/{apt,yum}-repo`. These directories look as follows:
+During CI runs, we create temporary repositories in `gs://fsruby-server-edition-ci-artifacts/$CI_RUN_NUMBER/{apt,yum}-repo`. These directories look as follows:
 
 ~~~
 /$CI_RUN_NUMBER/{apt,yum}-repo/
@@ -166,7 +166,7 @@ These directories are very similar to the production buckets' contents. But ther
 
 The CI tests run directly against this bucket URL instead of going through `https://{apt,yum}.fullstaqruby.org`.
 
-We create a temporary repository by copying over `gs://fullstaq-ruby-server-edition-{apt,yum}-repo/versions/$LATEST_VERSION`. This way we achieve production data parity during testing.
+We create a temporary repository by copying over `gs://fsruby-server-edition-{apt,yum}-repo/versions/$LATEST_VERSION`. This way we achieve production data parity during testing.
 
 ## Locking
 
@@ -183,10 +183,10 @@ The lock's critical section is quite large, and covers:
 
 The locks are located in the following URLs:
 
- * `gs://fullstaq-ruby-server-edition-apt-repo/locks/apt`
- * `gs://fullstaq-ruby-server-edition-yum-repo/locks/yum`
+ * `gs://fsruby-server-edition-apt-repo/locks/apt`
+ * `gs://fsruby-server-edition-yum-repo/locks/yum`
 
-When publishing to a testing repository (in `fullstaq-ruby-server-edition-ci-artifacts`) we don't perform any locking, because each CI run is guaranteed to write to its own temporary repository.
+When publishing to a testing repository (in `fsruby-server-edition-ci-artifacts`) we don't perform any locking, because each CI run is guaranteed to write to its own temporary repository.
 
 ## Backups
 
