@@ -115,8 +115,8 @@ distributions: all
 # distributions:
 #   - centos-8
 #   - el-9
-#   - debian-11
 #   - debian-12
+#   - debian-13
 #   - ubuntu-22.04
 #   - ubuntu-24.04
 

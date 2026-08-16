@@ -34,4 +34,5 @@ Review not only for correctness, but also security (VERY IMPORTANT):
 ## Shell scripting guidelines
 
 - CRITICALLY IMPORTANT: familiarize yourself with @./lib/library.sh first. Use helpers in `library.sh` instead of writing your own versions.
+- Ensure proper error handling. Use `set -e`, and if relevant also `-o pipefail`.
 - Put any cleanup code in a `_cleanup` function (auto-called by exit hook defined in library.sh).
