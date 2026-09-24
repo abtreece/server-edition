@@ -599,7 +599,7 @@ private
     log_info "  https://storage.googleapis.com/#{archive_bucket}/versions/#{new_archive_version}/public"
     log_info ''
     log_info 'Next steps:'
-    log_info '  1. Restart the web server to pick up new archive version'
+    log_info '  1. Restart Caddy on the backend server (required; archive stays 404 until then): sudo systemctl restart caddy'
     log_info '  2. Verify archive repo: curl https://apt-archive.fullstaqruby.org/dists/'
     log_info '  3. Verify main repo still works: apt-get update on a supported distro'
   end
