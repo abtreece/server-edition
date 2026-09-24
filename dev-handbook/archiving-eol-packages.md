@@ -97,14 +97,16 @@ ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-yum-archive-repo \
 
 ### Step 3: Restart the web server
 
-After migration, restart the web server so Caddy picks up the new version numbers:
+Caddy only reads repo version numbers at startup, and nothing restarts it after a manual migration. Until it restarts, archive requests keep redirecting to the old version (`versions/0/` on first migration) and return 404.
+
+The `/admin/restart_web_server` endpoint only accepts OIDC tokens from GitHub-hosted runners in this repo's `deploy` environment, so it can't be called by hand. Restart Caddy over SSH on the backend server instead:
 
 ~~~bash
-curl -X POST https://apt.fullstaqruby.org/admin/restart_web_server \
-  -H "Authorization: Bearer $ID_TOKEN"
-~~~
+sudo systemctl restart caddy
 
-Or restart the Caddy service directly via Ansible/SSH.
+# Confirm the archive versions are no longer 0
+sudo cat /etc/caddy/env-repo-versions
+~~~
 
 ### Step 4: Verify
 
