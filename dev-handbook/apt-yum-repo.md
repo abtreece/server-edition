@@ -52,11 +52,11 @@ There are five buckets:
 
  - `fsruby-server-edition-apt-repo` stores the production APT repository.
  - `fsruby-server-edition-yum-repo` stores the production YUM repository.
- - `fsruby-server-edition-apt-archive-repo` stores packages for EOL distributions (APT).
- - `fsruby-server-edition-yum-archive-repo` stores packages for EOL distributions (YUM).
+ - `fsruby-server-edition-apt-archive-repo` stores APT packages whose distribution or Ruby version is EOL.
+ - `fsruby-server-edition-yum-archive-repo` stores YUM packages whose distribution or Ruby version is EOL.
  - `fsruby-server-edition-ci-artifacts` stores the temporary repositories created during CI runs.
 
-The archive buckets are only updated during [EOL migration](archiving-eol-packages.md) — CI never writes to them. Each migration creates a new version that merges newly-archived distros with the existing archive contents. They are served at `apt-archive.fullstaqruby.org` and `yum-archive.fullstaqruby.org`.
+The production and archive buckets never contain the same package. The archive buckets are only updated by [archiving EOL packages](archiving-eol-packages.md) — CI never writes to them. Each archival run moves packages from the production bucket into the archive bucket, creating a new version of both. The archive buckets are served at `apt-archive.fullstaqruby.org` and `yum-archive.fullstaqruby.org`.
 
 We don't let users use the production bucket URLs directly. Instead, we let users use `https://apt.fullstaqruby.org` and `https://yum.fullstaqruby.org`. These domains redirect to the appropriate bucket URLs. We do this so that we avoid strongly coupling users with Google Cloud Storage. If in the future we want to move off Google Cloud, we can do so without breaking users' URLs.
 

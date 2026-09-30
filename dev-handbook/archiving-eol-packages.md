@@ -1,183 +1,175 @@
 # Archiving EOL packages
 
-This document describes how to archive packages for end-of-life (EOL) distributions and prune EOL Ruby versions from the repositories. This is a routine maintenance task that frees CI disk space and keeps the repository lean.
+This document describes how to move packages for end-of-life (EOL) distributions and EOL Ruby versions out of the live repositories and into the archive repositories. This is a routine maintenance task that frees CI disk space and keeps the live repositories lean, while keeping EOL packages installable.
 
 ## Background
 
 The CI publish step downloads the full Aptly state archive (`state.tar.zst`) from Google Cloud Storage on every run. This archive grows with every distribution and Ruby version ever published. When distributions or Ruby versions reach EOL, their packages remain in the state archive indefinitely, consuming disk space on GitHub Actions runners.
 
-To address this, we maintain **archive repositories** alongside the main repositories:
+To address this, we maintain **archive repositories** alongside the live repositories:
 
-| Repository | Bucket | Domain | Purpose |
-|------------|--------|--------|---------|
-| APT (main) | `fsruby-server-edition-apt-repo` | `apt.fullstaqruby.org` | Current, supported packages |
-| APT (archive) | `fsruby-server-edition-apt-archive-repo` | `apt-archive.fullstaqruby.org` | Frozen packages for EOL distributions |
-| YUM (main) | `fsruby-server-edition-yum-repo` | `yum.fullstaqruby.org` | Current, supported packages |
-| YUM (archive) | `fsruby-server-edition-yum-archive-repo` | `yum-archive.fullstaqruby.org` | Frozen packages for EOL distributions |
+| Repository | Bucket | Domain | Contents |
+|------------|--------|--------|----------|
+| APT (live) | `fsruby-server-edition-apt-repo` | `apt.fullstaqruby.org` | Packages whose distribution *and* Ruby version are both supported |
+| APT (archive) | `fsruby-server-edition-apt-archive-repo` | `apt-archive.fullstaqruby.org` | Packages whose distribution *or* Ruby version is EOL |
+| YUM (live) | `fsruby-server-edition-yum-repo` | `yum.fullstaqruby.org` | Packages whose distribution *and* Ruby version are both supported |
+| YUM (archive) | `fsruby-server-edition-yum-archive-repo` | `yum-archive.fullstaqruby.org` | Packages whose distribution *or* Ruby version is EOL |
 
-Archive repositories are static — CI never writes to them. They use the same versioned bucket structure as the main repos. Each migration creates a new version that merges newly-archived distros with the existing archive contents, so the archive grows incrementally over time.
+The live and archive repositories never contain the same package. Packages are moved, never deleted, so EOL packages remain installable from the archive.
+
+The archive only grows: packages are added to it as distributions and Ruby versions reach EOL. It uses the same versioned bucket structure as the live repositories, so each archival run creates a new archive version.
+
+CI never writes to the archive buckets. Packages only enter the archive through the archive scripts described below, run by hand. This is enforced in IAM (see the infra repo's `terraform/repo_buckets.tf`).
 
 This pattern follows the precedent set by [PostgreSQL](https://apt-archive.postgresql.org/) (`apt-archive.postgresql.org`) and [HashiCorp](https://www.hashicorp.com/en/blog/announcing-the-linux-package-archive-site) (`archive.releases.hashicorp.com`).
 
-## Two types of cleanup
+## What gets archived
 
-There are two independent axes of cleanup, each with its own script:
+Each script decides per package, based on the current `config.yml`:
 
-### 1. Distro archival — moving entire EOL distribution repos
+ * **EOL distribution** — the distribution has a repository in the live repo, but is no longer in `config.yml`'s distributions. *All* its packages are archived, including `fullstaq-ruby-common` and `fullstaq-rbenv`, and the distribution is removed from the live repo.
+ * **EOL Ruby version** — on a supported distribution, any `fullstaq-ruby-X.Y*` package where `X.Y` is not in `minor_version_packages`. This includes variants (`-jemalloc`, `-malloctrim`) and tiny-version packages (`fullstaq-ruby-X.Y.Z`).
 
-When a Linux distribution reaches EOL, we stop building packages for it and move its existing packages to the archive. Users on EOL distributions can still install packages by pointing at the archive repo.
+Everything else stays in the live repo. In particular:
 
-**Scripts:**
- * `internal-scripts/ci-cd/archive/migrate-apt-to-archive.rb`
- * `internal-scripts/ci-cd/archive/migrate-yum-to-archive.rb`
+ * `fullstaq-ruby-common` and `fullstaq-rbenv` stay on supported distributions.
+ * A tiny-version package stays as long as its minor version is active, even if it has been removed from `tiny_version_packages`.
 
-### 2. Package pruning — removing EOL Ruby version packages
+The scripts are:
 
-When a Ruby version reaches EOL, we stop building it (by removing it from `config.yml`), but its packages persist inside every distro's repository. Pruning removes these stale packages from the still-supported distro repos to reduce state size.
+ * `internal-scripts/ci-cd/archive/archive-apt-packages.rb`
+ * `internal-scripts/ci-cd/archive/archive-yum-packages.rb`
 
-**Scripts:**
- * `internal-scripts/ci-cd/archive/prune-apt-packages.rb`
- * `internal-scripts/ci-cd/archive/prune-yum-packages.rb`
+Both handle EOL distributions and EOL Ruby versions in the same run, so there is no ordering to get right.
 
-## Removing an EOL distribution
+## Procedure
 
 ### Step 1: Remove from the build system
 
+For an EOL distribution:
+
  1. Edit `config.yml` and remove the distribution from the `distributions` list (or add it to an exclusion).
  2. Delete the `environments/<distro>/` directory.
- 3. Regenerate CI/CD workflows:
+
+For an EOL Ruby version:
+
+ 1. Edit `config.yml` and remove the version from `minor_version_packages` (and `tiny_version_packages`).
+
+Then:
+
+ 1. Regenerate CI/CD workflows:
 
     ~~~bash
     ./internal-scripts/generate-ci-cd-yaml.rb
     ~~~
 
- 4. Commit and merge these changes.
+ 2. Commit and merge these changes.
 
-### Step 2: Migrate packages to the archive
+The scripts read `config.yml` from your working copy, so run them from an up-to-date checkout of `main`.
+
+### Step 2: Announce the change
+
+Users who install an EOL Ruby version, or any package on an EOL distribution, must add the archive repository after this step. Add an entry to the release notes of the next release. For example:
+
+> **Packages for EOL Ruby versions and distributions have moved to the archive repositories.** Packages for Ruby X.Y and for Distro N are no longer available from `apt.fullstaqruby.org` / `yum.fullstaqruby.org`. They remain installable from `apt-archive.fullstaqruby.org` / `yum-archive.fullstaqruby.org`, which use the same signing key. To keep installing them, add the archive repository alongside the regular one:
+>
+> APT:
+>
+>     deb https://apt-archive.fullstaqruby.org <distro> main
+>
+> YUM:
+>
+>     [fullstaq-ruby-archive]
+>     name=fullstaq-ruby-archive
+>     baseurl=https://yum-archive.fullstaqruby.org/<distro>/$basearch
+>     gpgcheck=0
+>     repo_gpgcheck=1
+>     enabled=1
+>     gpgkey=https://raw.githubusercontent.com/fullstaq-ruby/server-edition/main/fullstaq-ruby.asc
+>     sslverify=1
+
+Replace `X.Y`, `Distro N` and `<distro>` with what's being archived. Use the same `Signed-By` option in the APT line as the user's existing Fullstaq Ruby line, if it has one.
+
+### Step 3: Run the archive scripts
 
 **Prerequisites:**
- * `gcloud` CLI authenticated with write access to the GCS buckets
+
+ * `gcloud` CLI authenticated with write access to the live and archive buckets
  * `az` CLI authenticated with access to the `fsruby2infraowners` Key Vault (for the GPG signing key)
- * `aptly`, `zstd`, and `gpg` installed locally
- * Docker running (for `createrepo_c` in YUM migration)
+ * `aptly`, `zstd` and `gpg` installed locally (for APT)
+ * Docker running (for `createrepo_c`, for YUM)
+ * Enough free disk space for the full live APT state (roughly 30 GB at the time of writing)
 
-**Dry run first** to verify which distros will be archived:
-
-~~~bash
-PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-apt-repo \
-ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-apt-archive-repo \
-./internal-scripts/ci-cd/archive/migrate-apt-to-archive.rb --dry-run
-~~~
-
-The script auto-detects EOL distros by comparing `aptly repo list` output against the DEB distributions defined in `config.yml`. You can also specify distros explicitly (DEB-only — RPM distros belong to the YUM script):
-
-~~~bash
-./internal-scripts/ci-cd/archive/migrate-apt-to-archive.rb --dry-run --distros debian-10,ubuntu-20.04
-~~~
-
-**Execute the migration** (removes `--dry-run`):
+**Dry run first.** A dry run makes every change locally, including the checks described in [How the scripts work](#how-the-scripts-work), and prints the list of packages it would move, but uploads nothing:
 
 ~~~bash
 PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-apt-repo \
 ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-apt-archive-repo \
-./internal-scripts/ci-cd/archive/migrate-apt-to-archive.rb
+./internal-scripts/ci-cd/archive/archive-apt-packages.rb --dry-run
 ~~~
 
-**Repeat for YUM:**
+Review the list. Then run for real:
+
+~~~bash
+PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-apt-repo \
+ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-apt-archive-repo \
+./internal-scripts/ci-cd/archive/archive-apt-packages.rb
+~~~
+
+Repeat for YUM:
 
 ~~~bash
 PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-yum-repo \
 ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-yum-archive-repo \
-./internal-scripts/ci-cd/archive/migrate-yum-to-archive.rb --dry-run
+./internal-scripts/ci-cd/archive/archive-yum-packages.rb --dry-run
 
 PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-yum-repo \
 ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-yum-archive-repo \
-./internal-scripts/ci-cd/archive/migrate-yum-to-archive.rb
+./internal-scripts/ci-cd/archive/archive-yum-packages.rb
 ~~~
 
-### Step 3: Restart the web server
+The scripts hold the live repo's lock (`locks/apt` or `locks/yum`) for the whole run, so a CI publish can't run at the same time.
 
-Caddy only reads repo version numbers at startup, and nothing restarts it after a manual migration. Until it restarts, archive requests keep redirecting to the old version (`versions/0/` on first migration) and return 404.
+### Step 4: Restart the web server
+
+Caddy only reads repo version numbers at startup, and nothing restarts it after a manual archival run. Until it restarts, the live domains keep serving the pre-archival version and the archive domains keep serving the previous archive version (`versions/0/` on the first run, which returns 404).
 
 The `/admin/restart_web_server` endpoint only accepts OIDC tokens from GitHub-hosted runners in this repo's `deploy` environment, so it can't be called by hand. Restart Caddy over SSH on the backend server instead:
 
 ~~~bash
 sudo systemctl restart caddy
 
-# Confirm the archive versions are no longer 0
+# Confirm the new versions are loaded
 sudo cat /etc/caddy/env-repo-versions
 ~~~
 
-### Step 4: Verify
+### Step 5: Verify
 
 ~~~bash
-# Archive should list the archived distros
-curl -s https://apt-archive.fullstaqruby.org/dists/
+# Archive should serve the archived distributions
+curl -fsS https://apt-archive.fullstaqruby.org/dists/<distro>/Release
+curl -fsS https://yum-archive.fullstaqruby.org/<distro>/x86_64/repodata/repomd.xml
 
-# Main repo should only contain supported distros
-curl -s https://apt.fullstaqruby.org/dists/
+# Live repo should no longer list EOL packages
+curl -fsS https://apt.fullstaqruby.org/dists/<distro>/main/binary-amd64/Packages | grep '^Package: fullstaq-ruby-X.Y'
 
-# Verify state archive size decreased
+# State archive size should have decreased
 gsutil ls -l gs://fsruby-server-edition-apt-repo/versions/*/state.tar.zst | tail -5
 ~~~
 
-## Pruning EOL Ruby versions
-
-After removing a Ruby version from `config.yml`, its packages persist in the Aptly state. Run the pruning scripts to remove them.
-
-**Dry run:**
-
-~~~bash
-PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-apt-repo \
-./internal-scripts/ci-cd/archive/prune-apt-packages.rb --dry-run
-~~~
-
-The script compares packages in the Aptly state against `minor_version_packages` in `config.yml` and identifies any `fullstaq-ruby-X.Y*` packages where `X.Y` is not an active minor version.
-
-**Execute:**
-
-~~~bash
-PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-apt-repo \
-./internal-scripts/ci-cd/archive/prune-apt-packages.rb
-~~~
-
-**Repeat for YUM:**
-
-~~~bash
-PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-yum-repo \
-./internal-scripts/ci-cd/archive/prune-yum-packages.rb --dry-run
-
-PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-yum-repo \
-./internal-scripts/ci-cd/archive/prune-yum-packages.rb
-~~~
-
-Restart the web server after pruning (same as above).
-
-## Execution order
-
-When performing both distro archival and package pruning in the same session, always run distro archival **first**. This ensures the archive captures the full historical packages for EOL distros before any pruning happens.
-
- 1. `migrate-apt-to-archive.rb`
- 2. `prune-apt-packages.rb`
- 3. `migrate-yum-to-archive.rb`
- 4. `prune-yum-packages.rb`
- 5. Restart web server
-
 ## Rollback
 
-The versioned bucket structure makes rollback straightforward. Each migration creates a new version — the old version is never modified.
+Each run creates a new version of both repositories. Old versions are never modified, so rolling back means pointing `latest_version.txt` back at the previous version and restarting Caddy.
 
-**Revert the main APT repo to a previous version:**
+**Revert the live repo:**
 
 ~~~bash
-# Find the pre-migration version number
 gsutil cat gs://fsruby-server-edition-apt-repo/versions/latest_version.txt
 
-# Point back to the old version
 echo -n "OLD_VERSION" | gsutil -h Content-Type:text/plain -h Cache-Control:no-store cp - gs://fsruby-server-edition-apt-repo/versions/latest_version.txt
 ~~~
 
-**Revert the archive to a previous version:**
+**Revert the archive:**
 
 ~~~bash
 gsutil cat gs://fsruby-server-edition-apt-archive-repo/versions/latest_version.txt
@@ -185,47 +177,59 @@ gsutil cat gs://fsruby-server-edition-apt-archive-repo/versions/latest_version.t
 echo -n "OLD_VERSION" | gsutil -h Content-Type:text/plain -h Cache-Control:no-store cp - gs://fsruby-server-edition-apt-archive-repo/versions/latest_version.txt
 ~~~
 
-**Delete all archive contents** (if no users depend on it yet):
+Revert the live repo, not only the archive: reverting only the archive makes the moved packages unavailable from both.
+
+The same commands apply to the YUM buckets.
+
+## How the scripts work
+
+Both scripts follow the same sequence:
+
+ 1. Take the live repo's lock.
+ 2. Download the latest live repo version.
+ 3. Decide which packages to move (see [What gets archived](#what-gets-archived)).
+ 4. Download the latest archive version, if any.
+ 5. Add the packages to the local archive copy and regenerate its signed metadata.
+ 6. **Verify** that the archive's published metadata lists every package being moved. The script aborts here, before touching the live repo, if anything is missing.
+ 7. Remove the packages from the local live copy and regenerate its signed metadata.
+ 8. Verify that the live repo's published metadata no longer lists any of them.
+ 9. Upload the archive as version M+1 and activate it.
+ 10. Upload the live repo as version N+1 and activate it.
+
+The archive is activated before the live repo, so the moved packages are always available from at least one of them.
+
+**Reruns are safe.** If a run fails after step 9, rerun the script:
+
+ * packages already in the archive are skipped or re-added without change;
+ * the live repo is then trimmed as normal.
+
+A run with nothing to archive exits without uploading anything.
+
+### APT specifics
+
+ * Packages are added to the archive's Aptly instance individually, with `aptly repo add -force-replace` using the `.deb` files from the live state's pool. Only the moved packages' files end up in the archive's pool.
+ * EOL Ruby packages are removed from live with `aptly repo remove`. EOL distributions are unpublished and dropped with `aptly publish drop` and `aptly repo drop`.
+ * Both instances run `aptly db cleanup` after republishing, so unreferenced files leave the pool.
+ * Each distribution in the archive is its own Aptly repo and publication, named after the distribution, like in the live repo.
+
+### YUM specifics
+
+ * RPM files are copied into the archive's `<distro>/<arch>/` directory individually. Files already present are skipped.
+ * `createrepo_c` (in the utility Docker image) regenerates `repodata/` for every directory that changed, in both repositories, and `repomd.xml` is re-signed with the signing key.
+ * EOL distribution directories are deleted from the live copy.
+
+## Testing
+
+`internal-scripts/ci-cd/archive/test/run-tests.sh` runs both scripts against a fake Google Cloud Storage inside a Docker container with the same Aptly, `createrepo_c` and GPG versions CI uses. It seeds live repositories with a supported and an EOL distribution and an active and an EOL Ruby version, then checks that:
+
+ * a dry run uploads nothing;
+ * the right packages end up in each repository, and the two never overlap;
+ * all metadata is signed;
+ * a second run changes nothing;
+ * a rerun after a failure between the archive and live uploads completes correctly.
+
+It needs only Docker. It is not run by CI. Run it after changing either script:
 
 ~~~bash
-gsutil -m rm -r gs://fsruby-server-edition-apt-archive-repo/versions/
+./internal-scripts/ci-cd/archive/test/run-tests.sh
 ~~~
-
-## How the migration scripts work
-
-### APT migration (`migrate-apt-to-archive.rb`)
-
- 1. Downloads the current Aptly state archive from the main bucket.
- 2. Identifies EOL distros (published in Aptly but not in `config.yml`).
- 3. Fetches the existing archive state (if any) so new distros are merged into it.
- 4. Creates or extends the archive Aptly instance with EOL distro data and package pool.
- 5. Publishes all archive distros (existing + newly archived).
- 6. Drops the EOL distro repos from the main Aptly database.
- 7. Runs `aptly db cleanup` to compact the database and reclaim pool space.
- 8. Re-publishes remaining distros in the main repo.
- 9. Uploads the merged archive as a new archive version (N+1).
- 10. Uploads the trimmed state as a new version of the main repo.
-
-### YUM migration (`migrate-yum-to-archive.rb`)
-
- 1. Downloads the current YUM repo from the main bucket via `gsutil rsync`.
- 2. Identifies EOL distro directories.
- 3. Fetches the existing archive repo (if any) so new distros are merged into it.
- 4. Copies EOL distro directories into the local archive copy.
- 5. Uploads the merged archive as a new archive version (N+1).
- 6. Removes EOL distro directories from the main local copy.
- 7. Uploads the trimmed repo as a new version of the main bucket.
-
-### APT pruning (`prune-apt-packages.rb`)
-
- 1. Downloads the Aptly state.
- 2. Scans all packages across all distro repos, matching `fullstaq-ruby-X.Y*` against active minor versions.
- 3. Removes EOL Ruby packages using `aptly repo remove`.
- 4. Compacts, re-publishes, and uploads.
-
-### YUM pruning (`prune-yum-packages.rb`)
-
- 1. Downloads the YUM repo.
- 2. Deletes RPM files matching EOL Ruby versions from the filesystem.
- 3. Regenerates `repodata/` with `createrepo_c` and re-signs.
- 4. Uploads as a new version.
