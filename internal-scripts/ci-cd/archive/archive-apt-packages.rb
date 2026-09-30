@@ -260,8 +260,13 @@ private
     distributions.find_all { |d| d[:package_format] == :DEB }.map { |d| d[:name] }
   end
 
+  # A minor version is active while CI still builds any package for it:
+  # its minor-version package, or one of its tiny-version packages.
+  # Archiving a package CI still builds would put it in both repositories.
   def active_ruby_minor_versions
-    config[:ruby][:minor_version_packages].map { |p| p[:minor_version] }
+    minors = (config[:ruby][:minor_version_packages] || []).map { |p| p[:minor_version] }
+    tinys = (config[:ruby][:tiny_version_packages] || []).map { |p| p[:full_version].split('.')[0..1].join('.') }
+    (minors + tinys).uniq
   end
 
   def eol_ruby_package?(package_key, active_minors)
