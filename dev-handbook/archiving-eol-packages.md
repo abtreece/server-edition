@@ -27,13 +27,14 @@ This pattern follows the precedent set by [PostgreSQL](https://apt-archive.postg
 
 Each script decides per package, based on the current `config.yml`:
 
- * **EOL distribution** — the distribution has a repository in the live repo, but is no longer in `config.yml`'s distributions. *All* its packages are archived, including `fullstaq-ruby-common` and `fullstaq-rbenv`, and the distribution is removed from the live repo.
- * **EOL Ruby version** — on a supported distribution, any `fullstaq-ruby-X.Y*` package where `X.Y` is not in `minor_version_packages`. This includes variants (`-jemalloc`, `-malloctrim`) and tiny-version packages (`fullstaq-ruby-X.Y.Z`).
+ * **EOL distribution** — the distribution has a repository in the live repo, but is no longer built (see [Step 1](#step-1-remove-from-the-build-system)). *All* its packages are archived, including `fullstaq-ruby-common` and `fullstaq-rbenv`, and the distribution is removed from the live repo.
+ * **EOL Ruby version** — on a supported distribution, any `fullstaq-ruby-X.Y*` package where `X.Y` is not an active minor version (see below). This includes variants (`-jemalloc`, `-malloctrim`) and tiny-version packages (`fullstaq-ruby-X.Y.Z`).
 
 Everything else stays in the live repo. In particular:
 
  * `fullstaq-ruby-common` and `fullstaq-rbenv` stay on supported distributions.
  * A tiny-version package stays as long as its minor version is active, even if it has been removed from `tiny_version_packages`.
+ * A minor version counts as active while it appears in `minor_version_packages` *or* `tiny_version_packages`. So when retiring a Ruby minor version, remove it from both, or nothing for it is archived.
 
 The scripts are:
 
@@ -48,12 +49,14 @@ Both handle EOL distributions and EOL Ruby versions in the same run, so there is
 
 For an EOL distribution:
 
- 1. Edit `config.yml` and remove the distribution from the `distributions` list (or add it to an exclusion).
- 2. Delete the `environments/<distro>/` directory.
+ 1. Delete the `environments/<distro>/` directory. With `distributions: all` in `config.yml` (the default), that is what removes a distribution from the build.
+ 2. If `config.yml` lists distributions explicitly instead, remove it from that list too.
+
+`distribution_exclusions` is not a way to retire a distribution: it only stops particular Ruby versions being built for it.
 
 For an EOL Ruby version:
 
- 1. Edit `config.yml` and remove the version from `minor_version_packages` (and `tiny_version_packages`).
+ 1. Edit `config.yml` and remove the version from both `minor_version_packages` and `tiny_version_packages`.
 
 Then:
 
@@ -100,7 +103,7 @@ Replace `X.Y`, `Distro N` and `<distro>` with what's being archived. Use the sam
  * Docker running (for `createrepo_c`, for YUM)
  * Enough free disk space for the full live APT state (roughly 30 GB at the time of writing)
 
-**Dry run first.** A dry run makes every change locally, including the checks described in [How the scripts work](#how-the-scripts-work), and prints the list of packages it would move, but uploads nothing:
+**Dry run first.** A dry run makes every change locally, including the checks described in [How the scripts work](#how-the-scripts-work), and prints the list of packages it would move, but uploads nothing. It still takes the lock and downloads the full live state:
 
 ~~~bash
 PRODUCTION_REPO_BUCKET_NAME=fsruby-server-edition-apt-repo \
@@ -128,7 +131,7 @@ ARCHIVE_REPO_BUCKET_NAME=fsruby-server-edition-yum-archive-repo \
 ./internal-scripts/ci-cd/archive/archive-yum-packages.rb
 ~~~
 
-The scripts hold the live repo's lock (`locks/apt` or `locks/yum`) for the whole run, so a CI publish can't run at the same time.
+The scripts hold the live repo's lock (`locks/apt` or `locks/yum`) for the whole run, which can take an hour for APT. A CI publish waits at most 5 minutes for the lock, then fails. **Don't merge to `main` or re-run CI publishing during an archival run.** If a publish fails this way, re-run it afterwards.
 
 ### Step 4: Restart the web server
 
@@ -189,14 +192,13 @@ Both scripts follow the same sequence:
  2. Download the latest live repo version.
  3. Decide which packages to move (see [What gets archived](#what-gets-archived)).
  4. Download the latest archive version, if any.
- 5. Add the packages to the local archive copy and regenerate its signed metadata.
- 6. **Verify** that the archive's published metadata lists every package being moved. The script aborts here, before touching the live repo, if anything is missing.
- 7. Remove the packages from the local live copy and regenerate its signed metadata.
- 8. Verify that the live repo's published metadata no longer lists any of them.
- 9. Upload the archive as version M+1 and activate it.
- 10. Upload the live repo as version N+1 and activate it.
+ 5. Add the packages to the local archive copy and remove them from the local live copy.
+ 6. Regenerate the signed metadata of every distribution in both copies, not only the ones that changed.
+ 7. **Verify** that the archive's metadata lists every package being moved, and that the live repo's metadata lists none of them. The script aborts here, before uploading anything, if either check fails.
+ 8. Upload the archive as version M+1 and activate it.
+ 9. Upload the live repo as version N+1 and activate it.
 
-The archive is activated before the live repo, so the moved packages are always available from at least one of them.
+The archive is activated before the live repo, so the moved packages are always available from at least one of them. Before activating each version, the script checks that it still holds the lock.
 
 **Reruns are safe.** If a run fails after step 9, rerun the script:
 
@@ -209,7 +211,9 @@ A run with nothing to archive exits without uploading anything.
 
  * Packages are added to the archive's Aptly instance individually, with `aptly repo add -force-replace` using the `.deb` files from the live state's pool. Only the moved packages' files end up in the archive's pool.
  * EOL Ruby packages are removed from live with `aptly repo remove`. EOL distributions are unpublished and dropped with `aptly publish drop` and `aptly repo drop`.
- * Both instances run `aptly db cleanup` after republishing, so unreferenced files leave the pool.
+ * Both instances run `aptly db cleanup`, so unreferenced files leave the pool.
+ * Like `publish-debs.rb`, the state archive (`state.tar.zst`) is created *before* publishing, so it contains no publications and an empty `repo/` directory. `publish-debs.rb` creates publications without dropping existing ones, so it would fail on a state that has them. And an uploaded `repo/` would contain symlinks into a temporary directory that no longer exists.
+ * Every distribution is republished, because the upload replaces the whole public tree with the local one. A distribution that wasn't republished would disappear from it.
  * Each distribution in the archive is its own Aptly repo and publication, named after the distribution, like in the live repo.
 
 ### YUM specifics
@@ -224,11 +228,14 @@ A run with nothing to archive exits without uploading anything.
 
  * a dry run uploads nothing;
  * the right packages end up in each repository, and the two never overlap;
+ * distributions with nothing to archive are left alone;
  * all metadata is signed;
+ * the uploaded state has no publications, and `publish-debs.rb` can still publish afterwards;
  * a second run changes nothing;
- * a rerun after a failure between the archive and live uploads completes correctly.
+ * a rerun after a failure between the archive and live uploads completes correctly;
+ * a second archival round keeps previously archived distributions intact.
 
-It needs only Docker. It is not run by CI. Run it after changing either script:
+The seeded state is built the way `publish-debs.rb` builds it. It needs only Docker. It is not run by CI. Run it after changing either script:
 
 ~~~bash
 ./internal-scripts/ci-cd/archive/test/run-tests.sh
