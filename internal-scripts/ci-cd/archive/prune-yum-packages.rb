@@ -174,7 +174,7 @@ private
   end
 
   def active_ruby_minor_versions
-    config['ruby']['minor_version_packages'].map { |p| p['minor_version'] }
+    config[:ruby][:minor_version_packages].map { |p| p[:minor_version] }
   end
 
   def invoke_createrepo(dir)
