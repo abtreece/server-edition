@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Fake 'az keyvault secret show' for tests: prints the test signing key.
-set -eu
-cat "$FAKE_SIGNING_KEY_PATH"
+set -euo pipefail
+cat "${FAKE_SIGNING_KEY_PATH}"

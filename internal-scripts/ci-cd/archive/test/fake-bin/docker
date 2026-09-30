@@ -1,8 +1,8 @@
-#!/bin/sh
+#!/bin/bash
 # Fake docker for tests. 'docker inspect' succeeds, so the utility image
 # is never pulled. 'docker run ... -v DIR:/input... IMAGE createrepo_c ARGS'
 # runs createrepo_c locally against DIR.
-set -eu
+set -euo pipefail
 
 case "$1" in
     inspect)
@@ -11,26 +11,25 @@ case "$1" in
     run)
         shift
         input_dir=
-        while [ $# -gt 0 ]; do
+        while [[ $# -gt 0 ]]; do
             case "$1" in
                 --rm) shift ;;
                 --user) shift 2 ;;
-                -v) input_dir=${2%%:*}; shift 2 ;;
+                -v) input_dir="${2%%:*}"; shift 2 ;;
                 createrepo_c) break ;;
                 *) shift ;;
             esac
         done
         shift
-        args=
+        args=()
         for arg in "$@"; do
-            if [ "$arg" = /input ]; then
-                args="$args $input_dir"
+            if [[ "${arg}" == /input ]]; then
+                args+=("${input_dir}")
             else
-                args="$args $arg"
+                args+=("${arg}")
             fi
         done
-        # shellcheck disable=SC2086
-        exec createrepo_c $args
+        exec createrepo_c "${args[@]}"
         ;;
     *)
         echo "fake docker: unsupported command: $*" >&2

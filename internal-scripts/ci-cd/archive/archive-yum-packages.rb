@@ -46,11 +46,11 @@ class ArchiveYumPackages
     print_header 'Initializing'
     load_config
     create_temp_dirs
-    pull_utility_image_if_not_exists
-    initialize_locking
-    fetch_and_import_signing_key
-
     begin
+      pull_utility_image_if_not_exists
+      initialize_locking
+      fetch_and_import_signing_key
+
       synchronize do
         print_header 'Fetching live repository'
         @live_version = get_latest_version(live_bucket)
@@ -92,13 +92,10 @@ class ArchiveYumPackages
         # repository stops serving these packages.
         print_header 'Uploading archive repository'
         upload_version(archive_bucket, @archive_version, @archive_repo_path)
-        check_lock_health
 
         print_header 'Uploading live repository'
         upload_version(live_bucket, @live_version, @live_repo_path)
-      end
 
-      if @moves && !@moves.empty? && !@dry_run
         print_header 'Success!'
         print_summary
       end
@@ -126,7 +123,9 @@ private
 
   def create_temp_dirs
     log_notice 'Creating temporary directories'
-    @temp_dir = Dir.mktmpdir('archive-yum-packages')
+    # Under /tmp, not $TMPDIR: on macOS $TMPDIR is too long for gpg-agent's
+    # socket path, and the GPG home directory lives here.
+    @temp_dir = Dir.mktmpdir('archive-yum', '/tmp')
     @signing_key_path = "#{@temp_dir}/key.gpg"
     @live_repo_path = "#{@temp_dir}/live-repo"
     @archive_repo_path = "#{@temp_dir}/archive-repo"
@@ -380,6 +379,7 @@ private
     )
 
     write_gcs_text("#{version_url}/version.txt", new_version, 'public')
+    check_lock_health
     log_notice "Activating #{bucket} version #{new_version}"
     write_gcs_text("gs://#{bucket}/versions/latest_version.txt", new_version, 'no-store')
   end

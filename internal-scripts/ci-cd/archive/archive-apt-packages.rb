@@ -47,14 +47,14 @@ class ArchiveAptPackages
     print_header 'Initializing'
     load_config
     create_temp_dirs
-    ensure_gpg_state_isolated
-    activate_wrappers_bin_dir
-    initialize_locking
-    initialize_aptly(@live_aptly_config_path, @live_state_path)
-    initialize_aptly(@archive_aptly_config_path, @archive_state_path)
-    fetch_and_import_signing_key
-
     begin
+      ensure_gpg_state_isolated
+      activate_wrappers_bin_dir
+      initialize_locking
+      initialize_aptly(@live_aptly_config_path, @live_state_path)
+      initialize_aptly(@archive_aptly_config_path, @archive_state_path)
+      fetch_and_import_signing_key
+
       synchronize do
         print_header 'Fetching live repository state'
         @live_version = get_latest_version(live_bucket)
@@ -77,19 +77,31 @@ class ArchiveAptPackages
           log_notice 'No archive exists yet, creating a new one'
         end
 
-        print_header 'Adding packages to archive repository'
+        print_header 'Moving packages'
         add_to_archive
-        verify_archive
+        remove_from_live
+        compact_aptly_db(@archive_aptly_config_path)
+        compact_aptly_db(@live_aptly_config_path)
+
+        # Like publish-debs.rb, the state is archived *before* publishing,
+        # so that it contains no publications and an empty repo/ directory.
+        # publish-debs.rb creates publications without dropping them first,
+        # which fails if the state already has one.
+        if !@dry_run
+          print_header 'Creating state archives'
+          create_state_tarball(@archive_state_path, @archive_state_tarball_path)
+          create_state_tarball(@live_state_path, @live_state_tarball_path)
+        end
         check_lock_health
 
-        print_header 'Removing packages from live repository'
-        remove_from_live
+        # Every distribution is published, not only the ones that changed:
+        # the upload replaces the entire public tree with repo/.
+        print_header 'Publishing repositories'
+        publish_all(@archive_aptly_config_path)
+        publish_all(@live_aptly_config_path)
+        verify_archive
         verify_live
         check_lock_health
-
-        print_header 'Creating state archives'
-        create_state_tarball(@archive_state_path, @archive_state_tarball_path)
-        create_state_tarball(@live_state_path, @live_state_tarball_path)
 
         if @dry_run
           log_notice 'Dry run: not uploading changes'
@@ -100,13 +112,10 @@ class ArchiveAptPackages
         # repository stops serving these packages.
         print_header 'Uploading archive repository'
         upload_version(archive_bucket, @archive_version, @archive_state_path, @archive_state_tarball_path)
-        check_lock_health
 
         print_header 'Uploading live repository'
         upload_version(live_bucket, @live_version, @live_state_path, @live_state_tarball_path)
-      end
 
-      if @moves && !@moves.empty? && !@dry_run
         print_header 'Success!'
         print_summary
       end
@@ -134,7 +143,9 @@ private
 
   def create_temp_dirs
     log_notice 'Creating temporary directories'
-    @temp_dir = Dir.mktmpdir('archive-apt-packages')
+    # Under /tmp, not $TMPDIR: on macOS $TMPDIR is too long for gpg-agent's
+    # socket path, and the GPG home directory lives here.
+    @temp_dir = Dir.mktmpdir('archive-apt', '/tmp')
     @wrappers_bin_dir = "#{@temp_dir}/wrappers"
     @signing_key_path = "#{@temp_dir}/key.gpg"
 
@@ -330,11 +341,7 @@ private
           check_error: true
         )
       end
-
-      publish_aptly_repo(@archive_aptly_config_path, distro)
     end
-
-    compact_aptly_db(@archive_aptly_config_path)
   end
 
   # Paths of the .deb files in the live state's pool for the given package keys.
@@ -400,12 +407,15 @@ private
             check_error: true
           )
         end
-        publish_aptly_repo(@live_aptly_config_path, distro)
       end
     end
+  end
 
-    # Must run after republishing: published files keep pool files referenced.
-    compact_aptly_db(@live_aptly_config_path)
+  def publish_all(config_path)
+    list_aptly_repos(config_path).each do |distro|
+      log_notice "[#{distro}] Publishing #{config_path}"
+      publish_aptly_repo(config_path, distro)
+    end
   end
 
   def verify_live
@@ -578,6 +588,7 @@ private
     )
 
     write_gcs_text("#{version_url}/version.txt", new_version, 'public')
+    check_lock_health
     log_notice "Activating #{bucket} version #{new_version}"
     write_gcs_text("gs://#{bucket}/versions/latest_version.txt", new_version, 'no-store')
   end
